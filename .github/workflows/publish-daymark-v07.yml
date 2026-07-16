@@ -1,0 +1,39 @@
+name: Publish Daymark v0.7 history
+
+on:
+  push:
+    branches: [daymark-v07-publish]
+    paths:
+      - '.daymark-publish/**'
+      - '.github/workflows/publish-daymark-v07.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore and publish verified bundle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -f .daymark-publish/part-00
+          test -f .daymark-publish/part-01
+          test -f .daymark-publish/part-02
+          cat .daymark-publish/part-* | base64 --decode > /tmp/daymark-v0.7.bundle
+          git clone /tmp/daymark-v0.7.bundle /tmp/daymark-release
+          cd /tmp/daymark-release
+          git checkout v0.7-ui-v2
+          git config user.name "Daymark Release Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git remote add github "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch github daymark-calendar-v1
+          git merge --no-ff --allow-unrelated-histories -s ours github/daymark-calendar-v1 \
+            -m "chore: reconcile Daymark v0.7 release history" \
+            -m "Why: v0.6-v0.7 was developed and audited locally while the GitHub branch remained at v0.5." \
+            -m "Decision: retain the verified local logical commits and connect the existing remote history as a second parent without changing the v0.7 tree."
+          git push github HEAD:refs/heads/v0.7-ui-v2 --force-with-lease
+          git push github HEAD:refs/heads/daymark-calendar-v1
