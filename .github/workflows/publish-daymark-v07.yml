@@ -1,10 +1,10 @@
-name: Publish Daymark v0.7 history
+name: Publish Daymark v0.7
 
 on:
   push:
     branches: [daymark-v07-publish]
     paths:
-      - '.daymark-publish/**'
+      - '.daymark-source/**'
       - '.github/workflows/publish-daymark-v07.yml'
 
 permissions:
@@ -15,25 +15,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Restore and publish verified bundle
+        with:
+          ref: daymark-calendar-v1
+          fetch-depth: 0
+
+      - name: Reconstruct verified v0.7 source
+        run: |
+          set -euo pipefail
+          git fetch origin daymark-v07-publish
+          : > /tmp/publish-daymark-v07.sh
+          for n in $(seq -w 0 16); do
+            git show "origin/daymark-v07-publish:.daymark-source/part-${n}" >> /tmp/publish-daymark-v07.sh
+          done
+          chmod +x /tmp/publish-daymark-v07.sh
+          /tmp/publish-daymark-v07.sh
+
+      - name: Verify release
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python -m compileall src
+          PYTHONPATH=src xvfb-run -a python scripts/check.py
+
+      - name: Commit and publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          test -f .daymark-publish/part-00
-          test -f .daymark-publish/part-01
-          test -f .daymark-publish/part-02
-          cat .daymark-publish/part-* | base64 --decode > /tmp/daymark-v0.7.bundle
-          git clone /tmp/daymark-v0.7.bundle /tmp/daymark-release
-          cd /tmp/daymark-release
-          git checkout v0.7-ui-v2
           git config user.name "Daymark Release Bot"
           git config user.email "actions@users.noreply.github.com"
-          git remote add github "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git fetch github daymark-calendar-v1
-          git merge --no-ff --allow-unrelated-histories -s ours github/daymark-calendar-v1 \
-            -m "chore: reconcile Daymark v0.7 release history" \
-            -m "Why: v0.6-v0.7 was developed and audited locally while the GitHub branch remained at v0.5." \
-            -m "Decision: retain the verified local logical commits and connect the existing remote history as a second parent without changing the v0.7 tree."
-          git push github HEAD:refs/heads/v0.7-ui-v2 --force-with-lease
-          git push github HEAD:refs/heads/daymark-calendar-v1
+          git commit \
+            -m "feat: publish Daymark Calendar v0.7.0" \
+            -m "Why: The verified v0.6.1 audit fixes and UI v2 release were available only as local artifacts while the GitHub branch remained at v0.5." \
+            -m "Decision: Apply the complete verified v0.7 source set on top of the existing daymark-calendar-v1 history and publish only after the full Linux GUI test gate passes."
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin HEAD:refs/heads/daymark-calendar-v1
+          git push origin HEAD:refs/heads/v0.7-ui-v2
