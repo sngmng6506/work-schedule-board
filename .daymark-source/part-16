@@ -1,0 +1,13 @@
+            app.repository.add(date.today() - timedelta(days=1), "이전 업무")
+            app._carry_over()
+            app.update_idletasks()
+            ask.assert_not_called()
+            self.assertIn("원본 유지", app.status_message.get())
+            self.assertEqual("place", app.status_label.winfo_manager())
+            app._close()
+
+
+if __name__ == "__main__":
+    unittest.main()
+__DAYMARK_CHANGED_028__
+git add -A
