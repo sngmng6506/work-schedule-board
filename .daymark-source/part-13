@@ -1,0 +1,318 @@
+            self.assertEqual(1, host.last_display_index)
+            self.assertEqual(0.83, host.last_opacity)
+            self.assertEqual(1, host.attach_calls)
+
+            app._set_desktop_mode(False, notify=False)
+            self.assertFalse(app.desktop_mode_active)
+            self.assertFalse(app.settings.desktop_mode)
+            self.assertEqual("바탕화면", app.desktop_mode_label.get())
+            self.assertEqual(1, host.detach_calls)
+            app._close()
+
+    def test_user_toggle_uses_monitor_containing_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            host = FakeDesktopHost()
+            host.current_window_display = 1
+            app = DaymarkApp(Path(directory), desktop_host=host, auto_desktop_mode=False)
+            app.settings.desktop_display_index = 0
+
+            app._toggle_desktop_mode()
+
+            self.assertTrue(app.desktop_mode_active)
+            self.assertEqual(1, host.last_display_index)
+            self.assertEqual(1, app.settings.desktop_display_index)
+            app._close()
+
+    def test_settings_change_repositions_active_desktop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            host = FakeDesktopHost()
+            app = DaymarkApp(Path(directory), desktop_host=host, auto_desktop_mode=False)
+            app._set_desktop_mode(True, notify=False)
+            app.settings.desktop_display_index = 1
+            app.settings.window_opacity = 0.84
+
+            app._apply_saved_visual_settings()
+
+            self.assertEqual(1, host.maintain_calls)
+            self.assertEqual(1, host.last_display_index)
+            self.assertEqual(0.84, host.last_opacity)
+            app._close()
+
+    def test_failed_attach_falls_back_and_disables_saved_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            host = FakeDesktopHost(attach_success=False)
+            app = DaymarkApp(Path(directory), desktop_host=host, auto_desktop_mode=False)
+            app._set_desktop_mode(True, notify=False)
+            self.assertFalse(app.desktop_mode_active)
+            self.assertFalse(app.settings.desktop_mode)
+            self.assertEqual("바탕화면", app.desktop_mode_label.get())
+            app._close()
+
+    def test_split_surface_keeps_foreground_opaque_and_previews_backdrop(self) -> None:
+        import tkinter as tk
+
+        with tempfile.TemporaryDirectory() as directory:
+            foreground = FakeDesktopHost()
+            backdrop_host = FakeDesktopHost()
+            app = DaymarkApp(
+                Path(directory),
+                desktop_host=foreground,
+                backdrop_host=backdrop_host,
+                auto_desktop_mode=False,
+            )
+            app.split_surface_enabled = True
+            app.backdrop = tk.Toplevel(app)
+            app.backdrop.withdraw()
+            app.settings.window_opacity = 0.88
+            app.settings_store.save(app.settings)
+
+            app._set_desktop_mode(True, notify=False)
+
+            self.assertIsNone(foreground.last_opacity)
+            self.assertEqual(0.88, backdrop_host.last_opacity)
+
+            app._preview_opacity(0.81)
+            self.assertIsNone(foreground.last_opacity)
+            self.assertEqual(0.81, backdrop_host.last_opacity)
+            app._close()
+
+    def test_backdrop_attach_failure_detaches_successful_foreground(self) -> None:
+        import tkinter as tk
+
+        with tempfile.TemporaryDirectory() as directory:
+            foreground = FakeDesktopHost(attach_success=True)
+            backdrop_host = FakeDesktopHost(attach_success=False)
+            app = DaymarkApp(
+                Path(directory),
+                desktop_host=foreground,
+                backdrop_host=backdrop_host,
+                auto_desktop_mode=False,
+            )
+            app.split_surface_enabled = True
+            app.backdrop = tk.Toplevel(app)
+            app.backdrop.withdraw()
+
+            app._set_desktop_mode(True, notify=False)
+
+            self.assertFalse(app.desktop_mode_active)
+            self.assertFalse(foreground.attached)
+            self.assertGreaterEqual(foreground.detach_calls, 1)
+            app._close()
+
+    def test_maintenance_failure_detaches_both_surfaces(self) -> None:
+        import tkinter as tk
+
+        with tempfile.TemporaryDirectory() as directory:
+            foreground = FakeDesktopHost()
+            backdrop_host = FakeDesktopHost()
+            app = DaymarkApp(
+                Path(directory),
+                desktop_host=foreground,
+                backdrop_host=backdrop_host,
+                auto_desktop_mode=False,
+            )
+            app.split_surface_enabled = True
+            app.backdrop = tk.Toplevel(app)
+            app.backdrop.withdraw()
+            app._set_desktop_mode(True, notify=False)
+            app._cancel_desktop_maintenance()
+            backdrop_host._attached = False
+
+            app._maintain_desktop_mode()
+
+            self.assertFalse(app.desktop_mode_active)
+            self.assertFalse(foreground.attached)
+            self.assertFalse(backdrop_host.attached)
+            app._close()
+
+
+if __name__ == "__main__":
+    unittest.main()
+__DAYMARK_CHANGED_022__
+mkdir -p 'tests'
+cat > 'tests/test_desktop_host.py' <<'__DAYMARK_CHANGED_023__'
+from __future__ import annotations
+
+import unittest
+
+from daymark.platform_integration.desktop_host import DisplayInfo, UnsupportedDesktopHost
+from daymark.platform_integration.windows_desktop import (
+    WindowsDesktopHost,
+    _WS_CAPTION,
+    _WS_CHILD,
+    _WS_EX_LAYERED,
+    _WS_POPUP,
+)
+
+
+class FakeWindowsApi:
+    def __init__(self) -> None:
+        self.root = 100
+        self.desktop_parent = 200
+        self.backend = "WorkerW"
+        self.valid = {100, 200}
+        self.parents = {100: 0}
+        self.styles = {100: _WS_POPUP | _WS_CAPTION | 0x10000000}
+        self.ex_styles = {100: 0x00040000}
+        self.monitors = [
+            DisplayInfo(0, "PRIMARY", 0, 0, 1920, 1080, True),
+            DisplayInfo(1, "SECONDARY", 1920, 0, 2560, 1440, False),
+        ]
+        self.position_calls: list[tuple[int, int, DisplayInfo]] = []
+        self.opacity_calls: list[tuple[int, float]] = []
+        self.refresh_calls: list[int] = []
+        self.show_calls: list[int] = []
+        self.fail_position = False
+        self.window_display_index = 1
+
+    def root_window(self, tk_window_id: int) -> int:
+        self.last_tk_window_id = tk_window_id
+        return self.root
+
+    def find_desktop_parent(self) -> tuple[int, str]:
+        return self.desktop_parent, self.backend
+
+    def displays(self) -> list[DisplayInfo]:
+        return list(self.monitors)
+
+    def display_index_for_window(self, tk_window_id: int) -> int | None:
+        self.last_display_lookup_window = tk_window_id
+        return self.window_display_index
+
+    def is_window(self, hwnd: int) -> bool:
+        return hwnd in self.valid
+
+    def get_parent(self, hwnd: int) -> int:
+        return self.parents.get(hwnd, 0)
+
+    def get_style(self, hwnd: int) -> int:
+        return self.styles[hwnd]
+
+    def get_ex_style(self, hwnd: int) -> int:
+        return self.ex_styles[hwnd]
+
+    def set_style(self, hwnd: int, style: int) -> None:
+        self.styles[hwnd] = style
+
+    def set_ex_style(self, hwnd: int, style: int) -> None:
+        self.ex_styles[hwnd] = style
+
+    def set_parent(self, hwnd: int, parent: int) -> None:
+        self.parents[hwnd] = parent
+
+    def position_on_display(self, hwnd: int, parent: int, display: DisplayInfo) -> None:
+        if self.fail_position:
+            raise OSError("resize failed")
+        self.position_calls.append((hwnd, parent, display))
+
+    def apply_opacity(self, hwnd: int, opacity: float) -> None:
+        self.opacity_calls.append((hwnd, opacity))
+
+    def refresh_frame(self, hwnd: int) -> None:
+        self.refresh_calls.append(hwnd)
+
+    def show(self, hwnd: int) -> None:
+        self.show_calls.append(hwnd)
+
+
+class WindowsDesktopHostTest(unittest.TestCase):
+    def test_current_display_comes_from_window_location(self) -> None:
+        api = FakeWindowsApi()
+        host = WindowsDesktopHost(api)
+        self.assertEqual(1, host.current_display_index(77))
+        self.assertEqual(77, api.last_display_lookup_window)
+
+    def test_attach_uses_only_selected_monitor_and_restores_on_detach(self) -> None:
+        api = FakeWindowsApi()
+        original_style = api.styles[100]
+        original_ex_style = api.ex_styles[100]
+        host = WindowsDesktopHost(api)
+
+        result = host.attach(77, display_index=1, opacity=0.72)
+
+        self.assertTrue(result.success)
+        self.assertEqual("WorkerW", result.backend)
+        self.assertEqual(1, result.display_index)
+        self.assertTrue(host.attached)
+        self.assertEqual(200, api.parents[100])
+        self.assertTrue(api.styles[100] & _WS_CHILD)
+        self.assertTrue(api.styles[100] & 0x10000000)
+        self.assertFalse(api.styles[100] & _WS_POPUP)
+        self.assertFalse(api.styles[100] & _WS_CAPTION)
+        self.assertTrue(api.ex_styles[100] & _WS_EX_LAYERED)
+        self.assertEqual((100, 200, api.monitors[1]), api.position_calls[-1])
+        self.assertEqual((100, 0.72), api.opacity_calls[-1])
+
+        detached = host.detach()
+
+        self.assertTrue(detached.success)
+        self.assertFalse(host.attached)
+        self.assertEqual(0, api.parents[100])
+        self.assertEqual(original_style, api.styles[100])
+        self.assertEqual(original_ex_style, api.ex_styles[100])
+
+    def test_none_opacity_preserves_existing_layered_attributes(self) -> None:
+        api = FakeWindowsApi()
+        original_ex_style = api.ex_styles[100]
+        host = WindowsDesktopHost(api)
+
+        result = host.attach(77, display_index=0, opacity=None)
+
+        self.assertTrue(result.success)
+        self.assertEqual([], api.opacity_calls)
+        self.assertEqual(original_ex_style, api.ex_styles[100])
+
+    def test_invalid_monitor_index_falls_back_to_primary(self) -> None:
+        api = FakeWindowsApi()
+        host = WindowsDesktopHost(api)
+
+        result = host.attach(77, display_index=99, opacity=0.86)
+
+        self.assertTrue(result.success)
+        self.assertEqual(0, result.display_index)
+        self.assertEqual(api.monitors[0], api.position_calls[-1][2])
+
+    def test_maintain_repositions_and_reapplies_opacity(self) -> None:
+        api = FakeWindowsApi()
+        host = WindowsDesktopHost(api)
+        self.assertTrue(host.attach(77).success)
+
+        result = host.maintain(77, display_index=1, opacity=0.61)
+
+        self.assertTrue(result.success)
+        self.assertEqual(1, result.display_index)
+        self.assertEqual(api.monitors[1], api.position_calls[-1][2])
+        self.assertEqual((100, 0.61), api.opacity_calls[-1])
+
+    def test_maintain_reconnects_after_explorer_replaces_workerw(self) -> None:
+        api = FakeWindowsApi()
+        host = WindowsDesktopHost(api)
+        self.assertTrue(host.attach(77, display_index=1, opacity=0.75).success)
+
+        api.valid.remove(200)
+        api.desktop_parent = 300
+        api.valid.add(300)
+
+        result = host.maintain(77, display_index=1, opacity=0.75)
+
+        self.assertTrue(result.success)
+        self.assertEqual(300, api.parents[100])
+        self.assertEqual((100, 300, api.monitors[1]), api.position_calls[-1])
+
+    def test_partial_attach_failure_rolls_back_window_state(self) -> None:
+        api = FakeWindowsApi()
+        original_style = api.styles[100]
+        original_ex_style = api.ex_styles[100]
+        api.fail_position = True
+        host = WindowsDesktopHost(api)
+
+        result = host.attach(77)
+
+        self.assertFalse(result.success)
+        self.assertEqual(0, api.parents[100])
+        self.assertEqual(original_style, api.styles[100])
+        self.assertEqual(original_ex_style, api.ex_styles[100])
+
+    def test_missing_explorer_parent_fails_without_mutation(self) -> None:
+        api = FakeWindowsApi()
+        original_style = api.styles[100]
