@@ -1,0 +1,375 @@
+    base_url: str = "https://api.openai.com/v1"
+    timeout_seconds: int = 60
+
+    def generate(self, system_prompt: str, user_prompt: str) -> str:
+        if not self.api_key.strip():
+            raise LlmError("API 키가 설정되지 않았습니다.")
+        url = f"{self.base_url.rstrip('/')}/chat/completions"
+        payload = json.dumps(
+            {
+                "model": self.model,
+                "temperature": 0.2,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            }
+        ).encode("utf-8")
+        try:
+            request = urllib.request.Request(
+                url,
+                data=payload,
+                method="POST",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise LlmError(f"LLM 요청 실패 ({exc.code}): {detail[:300]}") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise LlmError(f"LLM 서버에 연결할 수 없습니다: {exc}") from exc
+        except (ValueError, UnicodeError, OSError) as exc:
+            raise LlmError(f"LLM 요청 또는 응답을 처리할 수 없습니다: {exc}") from exc
+        try:
+            return body["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError, TypeError, AttributeError) as exc:
+            raise LlmError("LLM 응답 형식을 해석할 수 없습니다.") from exc
+__DAYMARK_CHANGED_013__
+mkdir -p 'src/daymark'
+cat > 'src/daymark/settings.py' <<'__DAYMARK_CHANGED_014__'
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+from daymark.theme import DEFAULT_WINDOW_OPACITY, MAX_WINDOW_OPACITY, MIN_WINDOW_OPACITY
+
+DEFAULT_LLM_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_LLM_MODEL = "gpt-4.1-mini"
+
+
+def default_desktop_mode() -> bool:
+    return os.name == "nt"
+
+
+def clamp_opacity(value: object) -> float:
+    try:
+        opacity = float(value)
+    except (TypeError, ValueError):
+        opacity = DEFAULT_WINDOW_OPACITY
+    return min(MAX_WINDOW_OPACITY, max(MIN_WINDOW_OPACITY, opacity))
+
+
+@dataclass(slots=True)
+class AppSettings:
+    llm_base_url: str = DEFAULT_LLM_BASE_URL
+    llm_model: str = DEFAULT_LLM_MODEL
+    desktop_mode: bool = field(default_factory=default_desktop_mode)
+    desktop_display_index: int = 0
+    window_opacity: float = DEFAULT_WINDOW_OPACITY
+
+    @property
+    def api_key(self) -> str:
+        return os.environ.get("OPENAI_API_KEY", "")
+
+
+class SettingsStore:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def load(self) -> AppSettings:
+        if not self.path.exists():
+            return AppSettings()
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            return AppSettings(
+                llm_base_url=str(data.get("llm_base_url", DEFAULT_LLM_BASE_URL)),
+                llm_model=str(data.get("llm_model", DEFAULT_LLM_MODEL)),
+                desktop_mode=bool(data.get("desktop_mode", default_desktop_mode())),
+                desktop_display_index=max(0, int(data.get("desktop_display_index", 0))),
+                window_opacity=clamp_opacity(
+                    data.get("window_opacity", DEFAULT_WINDOW_OPACITY)
+                ),
+            )
+        except (OSError, ValueError, TypeError):
+            return AppSettings()
+
+    def save(self, settings: AppSettings) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        settings.window_opacity = clamp_opacity(settings.window_opacity)
+        settings.desktop_display_index = max(0, int(settings.desktop_display_index))
+        self.path.write_text(
+            json.dumps(asdict(settings), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+__DAYMARK_CHANGED_014__
+mkdir -p 'src/daymark'
+cat > 'src/daymark/theme.py' <<'__DAYMARK_CHANGED_015__'
+from __future__ import annotations
+
+from dataclasses import dataclass
+from functools import lru_cache
+import tkinter as tk
+import tkinter.font as tkfont
+
+WINDOW_BG = "#1C1C1E"
+CONTENT_BG = "#010203"  # Windows transparent-color key for the opaque foreground window
+HOVER_BG = "#252527"
+INPUT_FOCUS_BG = "#29292C"
+SELECTED_BG = "#272A2E"
+TEXT = "#F5F5F7"
+SUBTLE_TEXT = "#AEAEB2"
+MUTED_TEXT = "#6E6E73"
+OUTSIDE_TEXT = "#55565B"
+ACCENT = "#0A84FF"
+DANGER = "#FF453A"
+SATURDAY_BLUE = "#7893B8"
+HOLIDAY_RED = "#C97C82"
+SATURDAY_HEADER = "#637A99"
+HOLIDAY_HEADER = "#A5666C"
+OUTSIDE_SATURDAY = "#56677D"
+OUTSIDE_HOLIDAY = "#83575B"
+
+DEFAULT_WINDOW_OPACITY = 0.94
+MIN_WINDOW_OPACITY = 0.78
+MAX_WINDOW_OPACITY = 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class FontTokens:
+    family: str
+    month: tuple[str, int, str]
+    weekday: tuple[str, int, str]
+    date: tuple[str, int, str]
+    date_today: tuple[str, int, str]
+    task: tuple[str, int, str]
+    button: tuple[str, int, str]
+    dialog_title: tuple[str, int, str]
+    dialog_body: tuple[str, int, str]
+    caption: tuple[str, int, str]
+    section: tuple[str, int, str]
+    nav: tuple[str, int, str]
+
+    # Compatibility aliases kept so feature code does not hard-code font tuples.
+    @property
+    def body(self) -> tuple[str, int, str]:
+        return self.dialog_body
+
+    @property
+    def body_medium(self) -> tuple[str, int, str]:
+        return (self.family, self.dialog_body[1], "bold")
+
+
+@lru_cache(maxsize=8)
+def _available_families(root_id: int, root: tk.Misc) -> frozenset[str]:
+    del root_id
+    return frozenset(tkfont.families(root))
+
+
+def fonts(root: tk.Misc) -> FontTokens:
+    available = _available_families(id(root.winfo_toplevel()), root)
+    family = next(
+        (candidate for candidate in ("Segoe UI Variable", "Segoe UI") if candidate in available),
+        str(tkfont.nametofont("TkDefaultFont").actual("family")),
+    )
+    return FontTokens(
+        family=family,
+        month=(family, 18, "bold"),
+        weekday=(family, 10, "bold"),
+        date=(family, 11, "normal"),
+        date_today=(family, 11, "bold"),
+        task=(family, 11, "normal"),
+        button=(family, 10, "normal"),
+        dialog_title=(family, 13, "bold"),
+        dialog_body=(family, 10, "normal"),
+        caption=(family, 9, "normal"),
+        section=(family, 11, "bold"),
+        nav=(family, 22, "normal"),
+    )
+
+
+def flat_button_options(*, compact: bool = False, surface_bg: str = WINDOW_BG) -> dict[str, object]:
+    return {
+        "background": surface_bg,
+        "activebackground": HOVER_BG,
+        "foreground": SUBTLE_TEXT,
+        "activeforeground": TEXT,
+        "relief": "flat",
+        "borderwidth": 0,
+        "highlightthickness": 0,
+        "padx": 8 if compact else 12,
+        "pady": 5 if compact else 8,
+        "cursor": "hand2",
+        "takefocus": True,
+    }
+
+
+def primary_button_options() -> dict[str, object]:
+    return {
+        "background": ACCENT,
+        "activebackground": "#3395FF",
+        "foreground": TEXT,
+        "activeforeground": TEXT,
+        "disabledforeground": "#AFCFEF",
+        "relief": "flat",
+        "borderwidth": 0,
+        "highlightthickness": 0,
+        "padx": 16,
+        "pady": 8,
+        "cursor": "hand2",
+        "takefocus": True,
+    }
+__DAYMARK_CHANGED_015__
+mkdir -p 'src/daymark/ui'
+cat > 'src/daymark/ui/controls.py' <<'__DAYMARK_CHANGED_016__'
+from __future__ import annotations
+
+import tkinter as tk
+from collections.abc import Callable, Sequence
+
+from daymark.theme import (
+    ACCENT,
+    HOVER_BG,
+    INPUT_FOCUS_BG,
+    MUTED_TEXT,
+    SUBTLE_TEXT,
+    TEXT,
+    WINDOW_BG,
+    fonts,
+)
+
+
+class FlatSelect(tk.Menubutton):
+    def __init__(
+        self,
+        master: tk.Misc,
+        variable: tk.StringVar,
+        values: Sequence[str],
+        *,
+        width: int = 24,
+        on_change: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__(
+            master,
+            textvariable=variable,
+            background=INPUT_FOCUS_BG,
+            activebackground=HOVER_BG,
+            foreground=TEXT,
+            activeforeground=TEXT,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            anchor="w",
+            padx=12,
+            pady=8,
+            width=width,
+            cursor="hand2",
+            font=fonts(master).dialog_body,
+            indicatoron=True,
+            takefocus=True,
+        )
+        menu = tk.Menu(
+            self,
+            tearoff=False,
+            background=WINDOW_BG,
+            foreground=TEXT,
+            activebackground=HOVER_BG,
+            activeforeground=TEXT,
+            relief="flat",
+            borderwidth=0,
+            font=fonts(master).dialog_body,
+        )
+        for value in values:
+            menu.add_radiobutton(
+                label=value,
+                variable=variable,
+                value=value,
+                command=on_change,
+            )
+        self.configure(menu=menu)
+        self.menu = menu
+
+
+class FlatSlider(tk.Canvas):
+    """A flat, keyboard-accessible slider used for live opacity preview."""
+
+    HEIGHT = 30
+    KNOB_RADIUS = 8
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        variable: tk.DoubleVar,
+        *,
+        from_: float,
+        to: float,
+        resolution: float = 0.01,
+        command: Callable[[str], None] | None = None,
+        width: int = 400,
+    ) -> None:
+        super().__init__(
+            master,
+            width=width,
+            height=self.HEIGHT,
+            background=WINDOW_BG,
+            borderwidth=0,
+            highlightthickness=0,
+            takefocus=True,
+            cursor="hand2",
+        )
+        self.variable = variable
+        self.from_ = float(from_)
+        self.to = float(to)
+        self.resolution = float(resolution)
+        self.command = command
+        self.focused = False
+        self.hovered = False
+        self.bind("<Configure>", lambda _event: self._draw())
+        self.bind("<Button-1>", self._pointer)
+        self.bind("<B1-Motion>", self._pointer)
+        self.bind("<Enter>", self._enter)
+        self.bind("<Leave>", self._leave)
+        self.bind("<FocusIn>", self._focus_in)
+        self.bind("<FocusOut>", self._focus_out)
+        self.bind("<Left>", lambda _event: self._step(-1))
+        self.bind("<Right>", lambda _event: self._step(1))
+        self.bind("<Home>", lambda _event: self.set(self.from_))
+        self.bind("<End>", lambda _event: self.set(self.to))
+        self._draw()
+
+    def get(self) -> float:
+        return float(self.variable.get())
+
+    def set(self, value: float, *, notify: bool = True) -> None:
+        bounded = min(self.to, max(self.from_, float(value)))
+        steps = round((bounded - self.from_) / self.resolution)
+        snapped = self.from_ + steps * self.resolution
+        snapped = min(self.to, max(self.from_, snapped))
+        self.variable.set(snapped)
+        self._draw()
+        if notify and self.command is not None:
+            self.command(str(snapped))
+
+    def _pointer(self, event: tk.Event) -> None:
+        self.focus_set()
+        left, right = self._track_bounds()
+        ratio = 0.0 if right <= left else (event.x - left) / (right - left)
+        self.set(self.from_ + min(1.0, max(0.0, ratio)) * (self.to - self.from_))
+
+    def _step(self, direction: int) -> str:
+        self.set(self.get() + direction * self.resolution)
+        return "break"
+
+    def _enter(self, _event: tk.Event) -> None:
+        self.hovered = True
+        self._draw()
+
+    def _leave(self, _event: tk.Event) -> None:
+        self.hovered = False
+        self._draw()
+
