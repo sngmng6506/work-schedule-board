@@ -11,3 +11,4 @@ if __name__ == "__main__":
     unittest.main()
 __DAYMARK_CHANGED_028__
 git add -A
+# publish trigger after workflow registration
