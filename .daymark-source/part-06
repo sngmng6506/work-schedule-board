@@ -1,0 +1,364 @@
+        if self.desktop_mode_active:
+            self.desktop_host.detach()
+            if self.backdrop_host is not None:
+                self.backdrop_host.detach()
+        self.repository.close()
+        self.destroy()
+__DAYMARK_CHANGED_010__
+mkdir -p 'src/daymark/platform_integration'
+cat > 'src/daymark/platform_integration/desktop_host.py' <<'__DAYMARK_CHANGED_011__'
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Protocol
+
+
+@dataclass(frozen=True, slots=True)
+class DisplayInfo:
+    index: int
+    name: str
+    left: int
+    top: int
+    width: int
+    height: int
+    primary: bool = False
+    native_handle: int = 0
+
+    @property
+    def label(self) -> str:
+        primary = " · 주 모니터" if self.primary else ""
+        return f"{self.index + 1}번 모니터 · {self.width}×{self.height}{primary}"
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopAttachResult:
+    success: bool
+    backend: str = "window"
+    message: str = ""
+    display_index: int = 0
+
+
+class DesktopHost(Protocol):
+    @property
+    def supported(self) -> bool: ...
+
+    @property
+    def attached(self) -> bool: ...
+
+    def displays(self) -> list[DisplayInfo]: ...
+
+    def current_display_index(self, tk_window_id: int) -> int | None: ...
+
+    def attach(
+        self,
+        tk_window_id: int,
+        *,
+        display_index: int = 0,
+        opacity: float | None = 1.0,
+    ) -> DesktopAttachResult: ...
+
+    def detach(self) -> DesktopAttachResult: ...
+
+    def maintain(
+        self,
+        tk_window_id: int,
+        *,
+        display_index: int = 0,
+        opacity: float | None = 1.0,
+    ) -> DesktopAttachResult: ...
+
+
+class UnsupportedDesktopHost:
+    @property
+    def supported(self) -> bool:
+        return False
+
+    @property
+    def attached(self) -> bool:
+        return False
+
+    def displays(self) -> list[DisplayInfo]:
+        return []
+
+    def current_display_index(self, tk_window_id: int) -> int | None:
+        del tk_window_id
+        return None
+
+    def attach(
+        self,
+        tk_window_id: int,
+        *,
+        display_index: int = 0,
+        opacity: float | None = 1.0,
+    ) -> DesktopAttachResult:
+        del tk_window_id, display_index, opacity
+        return DesktopAttachResult(False, message="Windows에서만 바탕화면 모드를 사용할 수 있습니다.")
+
+    def detach(self) -> DesktopAttachResult:
+        return DesktopAttachResult(True, message="일반 창 모드입니다.")
+
+    def maintain(
+        self,
+        tk_window_id: int,
+        *,
+        display_index: int = 0,
+        opacity: float | None = 1.0,
+    ) -> DesktopAttachResult:
+        del tk_window_id, display_index, opacity
+        return DesktopAttachResult(True, message="일반 창 모드입니다.")
+
+
+def create_desktop_host() -> DesktopHost:
+    if os.name != "nt":
+        return UnsupportedDesktopHost()
+    from daymark.platform_integration.windows_desktop import WindowsDesktopHost
+
+    return WindowsDesktopHost()
+__DAYMARK_CHANGED_011__
+mkdir -p 'src/daymark/platform_integration'
+cat > 'src/daymark/platform_integration/windows_desktop.py' <<'__DAYMARK_CHANGED_012__'
+from __future__ import annotations
+
+import ctypes
+from ctypes import wintypes
+from dataclasses import dataclass
+from typing import Protocol
+
+from daymark.platform_integration.desktop_host import DesktopAttachResult, DisplayInfo
+
+# WorkerW 생성 메시지는 Windows Shell의 공개 API 계약이 아니다. 따라서 모든 실패는
+# 일반 창 모드로 안전하게 폴백하고, Explorer 재시작 시 재탐색한다.
+_SPAWN_WORKERW = 0x052C
+_SMTO_NORMAL = 0x0000
+_GA_ROOT = 2
+_GWL_STYLE = -16
+_GWL_EXSTYLE = -20
+_WS_CHILD = 0x40000000
+_WS_POPUP = 0x80000000
+_WS_CAPTION = 0x00C00000
+_WS_THICKFRAME = 0x00040000
+_WS_MINIMIZEBOX = 0x00020000
+_WS_MAXIMIZEBOX = 0x00010000
+_WS_SYSMENU = 0x00080000
+_WS_EX_LAYERED = 0x00080000
+_LWA_ALPHA = 0x00000002
+_MONITORINFOF_PRIMARY = 0x00000001
+_MONITOR_DEFAULTTONEAREST = 0x00000002
+_SW_SHOW = 5
+_SWP_NOSENDCHANGING = 0x0400
+_SWP_NOSIZE = 0x0001
+_SWP_NOMOVE = 0x0002
+_SWP_NOACTIVATE = 0x0010
+_SWP_SHOWWINDOW = 0x0040
+_SWP_FRAMECHANGED = 0x0020
+_HWND_TOP = 0
+
+
+class _MONITORINFOEXW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", wintypes.RECT),
+        ("rcWork", wintypes.RECT),
+        ("dwFlags", wintypes.DWORD),
+        ("szDevice", wintypes.WCHAR * 32),
+    ]
+
+
+class WindowsApi(Protocol):
+    def root_window(self, tk_window_id: int) -> int: ...
+
+    def find_desktop_parent(self) -> tuple[int, str]: ...
+
+    def displays(self) -> list[DisplayInfo]: ...
+
+    def display_index_for_window(self, tk_window_id: int) -> int | None: ...
+
+    def is_window(self, hwnd: int) -> bool: ...
+
+    def get_parent(self, hwnd: int) -> int: ...
+
+    def get_style(self, hwnd: int) -> int: ...
+
+    def get_ex_style(self, hwnd: int) -> int: ...
+
+    def set_style(self, hwnd: int, style: int) -> None: ...
+
+    def set_ex_style(self, hwnd: int, style: int) -> None: ...
+
+    def set_parent(self, hwnd: int, parent: int) -> None: ...
+
+    def position_on_display(self, hwnd: int, parent: int, display: DisplayInfo) -> None: ...
+
+    def apply_opacity(self, hwnd: int, opacity: float) -> None: ...
+
+    def refresh_frame(self, hwnd: int) -> None: ...
+
+    def show(self, hwnd: int) -> None: ...
+
+
+class NativeWindowsApi:
+    def __init__(self) -> None:
+        self.user32 = ctypes.WinDLL("user32", use_last_error=True)
+        self._long_ptr = ctypes.c_ssize_t
+        self._configure_signatures()
+
+    def _configure_signatures(self) -> None:
+        user32 = self.user32
+        user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+        user32.FindWindowW.restype = wintypes.HWND
+        user32.FindWindowExW.argtypes = [wintypes.HWND, wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR]
+        user32.FindWindowExW.restype = wintypes.HWND
+        user32.SendMessageTimeoutW.argtypes = [
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+            wintypes.UINT,
+            wintypes.UINT,
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+        user32.SendMessageTimeoutW.restype = wintypes.LPARAM
+        self._enum_window_proc_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        user32.EnumWindows.argtypes = [self._enum_window_proc_type, wintypes.LPARAM]
+        user32.EnumWindows.restype = wintypes.BOOL
+        self._enum_monitor_proc_type = ctypes.WINFUNCTYPE(
+            wintypes.BOOL,
+            ctypes.c_void_p,
+            wintypes.HDC,
+            ctypes.POINTER(wintypes.RECT),
+            wintypes.LPARAM,
+        )
+        user32.EnumDisplayMonitors.argtypes = [
+            wintypes.HDC,
+            ctypes.POINTER(wintypes.RECT),
+            self._enum_monitor_proc_type,
+            wintypes.LPARAM,
+        ]
+        user32.EnumDisplayMonitors.restype = wintypes.BOOL
+        user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_MONITORINFOEXW)]
+        user32.GetMonitorInfoW.restype = wintypes.BOOL
+        user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        user32.MonitorFromWindow.restype = ctypes.c_void_p
+        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetAncestor.restype = wintypes.HWND
+        user32.IsWindow.argtypes = [wintypes.HWND]
+        user32.IsWindow.restype = wintypes.BOOL
+        user32.GetParent.argtypes = [wintypes.HWND]
+        user32.GetParent.restype = wintypes.HWND
+        user32.SetParent.argtypes = [wintypes.HWND, wintypes.HWND]
+        user32.SetParent.restype = wintypes.HWND
+        user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.GetWindowLongPtrW.restype = self._long_ptr
+        user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, self._long_ptr]
+        user32.SetWindowLongPtrW.restype = self._long_ptr
+        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        user32.GetWindowRect.restype = wintypes.BOOL
+        user32.SetWindowPos.argtypes = [
+            wintypes.HWND,
+            wintypes.HWND,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            wintypes.UINT,
+        ]
+        user32.SetWindowPos.restype = wintypes.BOOL
+        user32.SetLayeredWindowAttributes.argtypes = [
+            wintypes.HWND,
+            wintypes.COLORREF,
+            wintypes.BYTE,
+            wintypes.DWORD,
+        ]
+        user32.SetLayeredWindowAttributes.restype = wintypes.BOOL
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindow.restype = wintypes.BOOL
+
+    @staticmethod
+    def _raise_last_error(operation: str) -> None:
+        error = ctypes.get_last_error()
+        if error:
+            raise OSError(error, f"{operation} failed")
+        raise OSError(f"{operation} failed")
+
+    def root_window(self, tk_window_id: int) -> int:
+        root = int(self.user32.GetAncestor(wintypes.HWND(tk_window_id), _GA_ROOT) or 0)
+        return root or int(tk_window_id)
+
+    def find_desktop_parent(self) -> tuple[int, str]:
+        progman = int(self.user32.FindWindowW("Progman", None) or 0)
+        if not progman:
+            return 0, ""
+
+        result = ctypes.c_size_t()
+        self.user32.SendMessageTimeoutW(
+            wintypes.HWND(progman),
+            _SPAWN_WORKERW,
+            0,
+            0,
+            _SMTO_NORMAL,
+            1000,
+            ctypes.byref(result),
+        )
+
+        desktop_parent = 0
+
+        @self._enum_window_proc_type
+        def enum_windows(hwnd: wintypes.HWND, lparam: wintypes.LPARAM) -> wintypes.BOOL:
+            del lparam
+            nonlocal desktop_parent
+            def_view = self.user32.FindWindowExW(hwnd, None, "SHELLDLL_DefView", None)
+            if def_view:
+                sibling = self.user32.FindWindowExW(None, wintypes.HWND(hwnd), "WorkerW", None)
+                if sibling:
+                    desktop_parent = int(sibling)
+                    return False
+            return True
+
+        self.user32.EnumWindows(enum_windows, 0)
+        if desktop_parent:
+            return desktop_parent, "WorkerW"
+
+        def_view = self.user32.FindWindowExW(wintypes.HWND(progman), None, "SHELLDLL_DefView", None)
+        if def_view:
+            return progman, "Progman"
+        return 0, ""
+
+    def displays(self) -> list[DisplayInfo]:
+        found: list[tuple[int, str, int, int, int, int, bool]] = []
+
+        @self._enum_monitor_proc_type
+        def enum_monitor(
+            monitor: ctypes.c_void_p,
+            hdc: wintypes.HDC,
+            rect: ctypes.POINTER(wintypes.RECT),
+            lparam: wintypes.LPARAM,
+        ) -> wintypes.BOOL:
+            del hdc, rect, lparam
+            info = _MONITORINFOEXW()
+            info.cbSize = ctypes.sizeof(_MONITORINFOEXW)
+            if self.user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                bounds = info.rcMonitor
+                found.append(
+                    (
+                        int(monitor or 0),
+                        str(info.szDevice),
+                        int(bounds.left),
+                        int(bounds.top),
+                        int(bounds.right - bounds.left),
+                        int(bounds.bottom - bounds.top),
+                        bool(info.dwFlags & _MONITORINFOF_PRIMARY),
+                    )
+                )
+            return True
+
+        if not self.user32.EnumDisplayMonitors(None, None, enum_monitor, 0):
+            self._raise_last_error("EnumDisplayMonitors")
+
+        # 설정의 0번이 항상 주 모니터가 되도록 정렬한다. 나머지는 화면 배치 순서다.
+        found.sort(key=lambda item: (not item[6], item[2], item[3], item[1]))
+        return [
+            DisplayInfo(
+                index=index,
+                name=name,
+                left=left,
