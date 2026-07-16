@@ -1,0 +1,291 @@
+        for row in range(1, 7):
+            self.calendar_frame.rowconfigure(row, weight=1, uniform="calendar", minsize=0)
+        for week, dates in enumerate(matrix, start=1):
+            for column, task_date in enumerate(dates):
+                day_cell = DayCell(
+                    self.calendar_frame,
+                    task_date,
+                    self.current.month,
+                    self.repository,
+                    holiday_calendar=self.holiday_calendar,
+                    on_changed=self._update_summary,
+                    on_selected=self._select_date,
+                    surface_bg=self.surface_bg,
+                    selected=task_date == self.selected_date,
+                )
+                self.day_cells[task_date] = day_cell
+                day_cell.grid(row=week, column=column, sticky="nsew", padx=7, pady=4)
+        self._update_summary()
+
+    def _update_summary(self) -> None:
+        start = self.current.replace(day=1)
+        end = self.current.replace(day=monthrange(self.current.year, self.current.month)[1])
+        tasks = self.repository.list_between(start, end)
+        completed = sum(task.completed for task in tasks)
+        self.summary.set(f"업무 {len(tasks)} · 완료 {completed} · 미완료 {len(tasks) - completed}")
+
+    def _select_date(self, selected: date) -> None:
+        previous = self.selected_date
+        self.selected_date = selected
+        if previous in self.day_cells:
+            self.day_cells[previous].set_selected(False)
+        if selected in self.day_cells:
+            self.day_cells[selected].set_selected(True)
+
+    def _change_month(self, delta: int) -> None:
+        self.current = shift_month(self.current, delta).replace(day=1)
+        self.selected_date = self.current
+        self.render_month()
+
+    def _go_today(self) -> None:
+        self.current = date.today().replace(day=1)
+        self.selected_date = date.today()
+        self.render_month()
+
+    def _carry_over(self) -> None:
+        today = date.today()
+        copied = self.repository.copy_incomplete_before(today)
+        self.current = today.replace(day=1)
+        self.selected_date = today
+        self.render_month()
+        if copied:
+            self._set_status(f"미완료 업무 {copied}개를 오늘로 복사했습니다 · 원본 유지")
+        else:
+            self._set_status("복사할 미완료 업무가 없습니다")
+
+    def _open_report(self) -> None:
+        self._present_dialog(ReportDialog(self, self.repository, self.settings, self.selected_date))
+
+    def _open_settings(self) -> None:
+        self._present_dialog(
+            SettingsDialog(
+                self,
+                self.settings,
+                self.settings_store,
+                displays=self.desktop_host.displays(),
+                on_saved=self._apply_saved_visual_settings,
+                on_opacity_preview=self._preview_opacity,
+            )
+        )
+
+    def _apply_saved_visual_settings(self) -> None:
+        self.window_opacity = clamp_opacity(self.settings.window_opacity)
+        self._reapply_transparency()
+        self._sync_backdrop_geometry()
+        if not self.desktop_mode_active:
+            return
+        backdrop_result: DesktopAttachResult | None = None
+        if self.split_surface_enabled and self.backdrop is not None and self.backdrop_host is not None:
+            backdrop_result = self.backdrop_host.maintain(
+                self.backdrop.winfo_id(),
+                display_index=self.settings.desktop_display_index,
+                opacity=self.window_opacity,
+            )
+        result = self.desktop_host.maintain(
+            self.winfo_id(),
+            display_index=self.settings.desktop_display_index,
+            opacity=None if self.split_surface_enabled else self.window_opacity,
+        )
+        if backdrop_result is not None and not backdrop_result.success:
+            result = backdrop_result
+        if not result.success:
+            self._fallback_to_window_mode()
+            messagebox.showwarning("바탕화면 설정", result.message, parent=self)
+            return
+        if result.display_index != self.settings.desktop_display_index:
+            self.settings.desktop_display_index = result.display_index
+            self.settings_store.save(self.settings)
+        self._reapply_transparency()
+
+    def _present_dialog(self, dialog: tk.Toplevel) -> None:
+        if not self.desktop_mode_active:
+            return
+        # WorkerW의 자식 창에서 연 대화상자가 바탕화면 아래로 내려가지 않도록
+        # 최초 표시 순간에만 앞으로 올린 뒤 일반 Z-order로 되돌린다.
+        try:
+            dialog.attributes("-topmost", True)
+
+            def release_topmost() -> None:
+                try:
+                    if dialog.winfo_exists():
+                        dialog.attributes("-topmost", False)
+                except tk.TclError:
+                    pass
+
+            dialog.after(150, release_topmost)
+            dialog.lift()
+            dialog.focus_force()
+        except tk.TclError:
+            pass
+
+    def _toggle_desktop_mode_event(self, event: tk.Event[tk.Misc]) -> str:
+        del event
+        self._toggle_desktop_mode()
+        return "break"
+
+    def _toggle_desktop_mode(self) -> None:
+        self._set_desktop_mode(
+            not self.desktop_mode_active,
+            notify=True,
+            prefer_current_display=not self.desktop_mode_active,
+        )
+
+    def _set_desktop_mode(
+        self,
+        enabled: bool,
+        *,
+        notify: bool,
+        prefer_current_display: bool = False,
+    ) -> None:
+        if enabled:
+            if not self.desktop_host.supported:
+                if notify:
+                    messagebox.showinfo(
+                        "바탕화면 모드",
+                        "Windows에서만 바탕화면 레이어에 고정할 수 있습니다.",
+                        parent=self,
+                    )
+                return
+            self.normal_geometry = self.geometry()
+            self._reload_persisted_opacity()
+            if prefer_current_display:
+                current_display = self.desktop_host.current_display_index(self.winfo_id())
+                if current_display is not None:
+                    self.settings.desktop_display_index = current_display
+            try:
+                self.overrideredirect(True)
+                self.update_idletasks()
+            except tk.TclError:
+                pass
+            backdrop_result: DesktopAttachResult | None = None
+            if self.split_surface_enabled and self.backdrop is not None and self.backdrop_host is not None:
+                self.backdrop.deiconify()
+                self.backdrop.update_idletasks()
+                backdrop_result = self.backdrop_host.attach(
+                    self.backdrop.winfo_id(),
+                    display_index=self.settings.desktop_display_index,
+                    opacity=self.window_opacity,
+                )
+            result = self.desktop_host.attach(
+                self.winfo_id(),
+                display_index=self.settings.desktop_display_index,
+                opacity=None if self.split_surface_enabled else self.window_opacity,
+            )
+            if backdrop_result is not None and not backdrop_result.success:
+                result = backdrop_result
+            if not result.success:
+                self._fallback_to_window_mode()
+                if notify:
+                    messagebox.showwarning("바탕화면 모드", result.message, parent=self)
+                return
+            self.desktop_mode_active = True
+            self.settings.desktop_mode = True
+            self.settings.desktop_display_index = result.display_index
+            self.desktop_mode_label.set("창 모드")
+            self.settings_store.save(self.settings)
+            self._reapply_transparency()
+            self._schedule_desktop_maintenance()
+            return
+
+        self._cancel_desktop_maintenance()
+        result = self.desktop_host.detach()
+        if self.backdrop_host is not None:
+            self.backdrop_host.detach()
+        self.desktop_mode_active = False
+        self.settings.desktop_mode = False
+        self.desktop_mode_label.set("바탕화면")
+        self.settings_store.save(self.settings)
+        self._restore_normal_window_chrome()
+        self._reapply_transparency()
+        self._schedule_backdrop_sync()
+        if notify and not result.success:
+            messagebox.showwarning("창 모드", result.message, parent=self)
+
+    def _fallback_to_window_mode(self) -> None:
+        """Detach both split surfaces before presenting the app as a normal window."""
+        self._cancel_desktop_maintenance()
+        try:
+            self.desktop_host.detach()
+        finally:
+            if self.backdrop_host is not None:
+                self.backdrop_host.detach()
+        self.desktop_mode_active = False
+        self.settings.desktop_mode = False
+        self.desktop_mode_label.set("바탕화면")
+        self.settings_store.save(self.settings)
+        self._restore_normal_window_chrome()
+        self._reapply_transparency()
+        self._schedule_backdrop_sync()
+
+    def _restore_normal_window_chrome(self) -> None:
+        try:
+            self.overrideredirect(False)
+            self.update_idletasks()
+            self.geometry(self.normal_geometry)
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+        except tk.TclError:
+            pass
+
+    def _schedule_desktop_maintenance(self) -> None:
+        self._cancel_desktop_maintenance()
+        self.desktop_maintenance_job = self.after(2500, self._maintain_desktop_mode)
+
+    def _cancel_desktop_maintenance(self) -> None:
+        if self.desktop_maintenance_job is None:
+            return
+        try:
+            self.after_cancel(self.desktop_maintenance_job)
+        except tk.TclError:
+            pass
+        self.desktop_maintenance_job = None
+
+    def _maintain_desktop_mode(self) -> None:
+        self.desktop_maintenance_job = None
+        if not self.desktop_mode_active:
+            return
+        backdrop_result: DesktopAttachResult | None = None
+        if self.split_surface_enabled and self.backdrop is not None and self.backdrop_host is not None:
+            backdrop_result = self.backdrop_host.maintain(
+                self.backdrop.winfo_id(),
+                display_index=self.settings.desktop_display_index,
+                opacity=self.window_opacity,
+            )
+        result: DesktopAttachResult = self.desktop_host.maintain(
+            self.winfo_id(),
+            display_index=self.settings.desktop_display_index,
+            opacity=None if self.split_surface_enabled else self.window_opacity,
+        )
+        if backdrop_result is not None and not backdrop_result.success:
+            result = backdrop_result
+        if not result.success:
+            self._fallback_to_window_mode()
+            return
+        if result.display_index != self.settings.desktop_display_index:
+            self.settings.desktop_display_index = result.display_index
+            self.settings_store.save(self.settings)
+        self._reapply_transparency()
+        self._schedule_desktop_maintenance()
+
+    def _close(self) -> None:
+        self.more_menu.close()
+        self._cancel_desktop_maintenance()
+        if self.status_job is not None:
+            try:
+                self.after_cancel(self.status_job)
+            except tk.TclError:
+                pass
+            self.status_job = None
+        if self.backdrop_sync_job is not None:
+            try:
+                self.after_cancel(self.backdrop_sync_job)
+            except tk.TclError:
+                pass
+            self.backdrop_sync_job = None
+        for job_id in tuple(self.transparency_jobs):
+            try:
+                self.after_cancel(job_id)
+            except tk.TclError:
+                pass
+        self.transparency_jobs.clear()
